@@ -1,56 +1,73 @@
-from pyftpdlib.authorizers import DummyAuthorizer
-from pyftpdlib.handlers import FTPHandler
-from pyftpdlib.servers import FTPServer
+import socket
 import json
+import base64
 
-# Define the credentials for the fake FTP server
-FTP_USERNAME = 'admin'
-FTP_PASSWORD = 'password'
-FTP_DIRECTORY = '/tmp'
+# Define the port and address to listen on
+HOST = '0.0.0.0'
+PORT = 21
 
-# Define the IP address and port number to listen on
-FTP_SERVER_ADDRESS = '0.0.0.0'
-FTP_SERVER_PORT = 21
+# Create a socket object
+serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-# Define the function to log FTP commands
-def log_command(cmd):
-    log_data = {"command": cmd}
-    log_json = json.dumps(log_data)
+# Bind the socket to the host and port
+serversocket.bind((HOST, PORT))
 
-    with open("honeypot.log", "a") as log_file:
-        log_file.write(log_json + "\n")
+# Start listening for incoming requests
+serversocket.listen(1)
 
-# Define the FTP authorizer
-authorizer = DummyAuthorizer()
-authorizer.add_user(FTP_USERNAME, FTP_PASSWORD, FTP_DIRECTORY, perm="elradfmwMT")
+print(f'Honeypot listening on {HOST}:{PORT}...')
 
-# Define the FTP handler
-class MyHandler(FTPHandler):
-    def on_file_sent(self, file):
-        log_command("STOR " + file)
-        return FTPHandler.on_file_sent(self, file)
+while True:
+    # Wait for a client connection
+    clientsocket, address = serversocket.accept()
 
-    def on_file_received(self, file):
-        log_command("RETR " + file)
-        return FTPHandler.on_file_received(self, file)
+    # Send a fake welcome message
+    clientsocket.sendall(b'220 Welcome to the FTP honeypot!\r\n')
 
-    def on_mkd(self, path):
-        log_command("MKD " + path)
-        return FTPHandler.on_mkd(self, path)
+    # Start the session
+    while True:
+        # Receive the client request
+        request = clientsocket.recv(1024).decode('utf-8')
 
-    def on_rmd(self, path):
-        log_command("RMD " + path)
-        return FTPHandler.on_rmd(self, path)
+        # Break the loop if the client has disconnected
+        if not request:
+            break
 
-    def on_rename(self, oldpath, newpath):
-        log_command("RNFR " + oldpath)
-        log_command("RNTO " + newpath)
-        return FTPHandler.on_rename(self, oldpath, newpath)
+        # Log the request
+        log_data = {
+            "client_address": address[0],
+            "client_port": address[1],
+            "request": request.strip()
+        }
+        log_json = json.dumps(log_data)
 
-# Define the FTP server
-handler = MyHandler
-handler.authorizer = authorizer
-server = FTPServer((FTP_SERVER_ADDRESS, FTP_SERVER_PORT), handler)
+        with open("ftp_honeypot.log", "a") as log_file:
+            log_file.write(log_json + "\n")
 
-# Start the FTP server
-server.serve_forever()
+        # Send a fake response
+        if request.startswith('USER'):
+            response = b'331 Password required for user.\r\n'
+        elif request.startswith('PASS'):
+            response = b'230 User logged in, proceed.\r\n'
+        elif request.startswith('LIST'):
+            response = b'150 Here comes the directory listing.\r\n'
+            response += base64.b64encode(b'-rw-r--r-- 1 user user 123 Jan  1 00:00 file1.txt\r\n')
+            response += base64.b64encode(b'-rw-r--r-- 1 user user 456 Jan  1 00:00 file2.txt\r\n')
+            response += base64.b64encode(b'drwxr-xr-x 2 user user 4096 Jan  1 00:00 dir1\r\n')
+            response += base64.b64encode(b'drwxr-xr-x 2 user user 4096 Jan  1 00:00 dir2\r\n')
+            response += base64.b64encode(b'226 Directory send OK.\r\n')
+        elif request.startswith('RETR'):
+            response = b'150 Opening BINARY mode data connection.\r\n'
+            response += base64.b64encode(b'Hello, world!\r\n')
+            response += base64.b64encode(b'226 Transfer complete.\r\n')
+        elif request.startswith('STOR'):
+            response = b'150 Ok to send data.\r\n'
+            response += base64.b64encode(b'226 Transfer complete.\r\n')
+        else:
+            response = b'502 Command not implemented.\r\n'
+
+        # Send the fake response to the client
+        clientsocket.sendall(response)
+
+    # Close the connection with the client
+    clientsocket.close()
